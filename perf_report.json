@@ -1,0 +1,31 @@
+{
+  "baseline": {
+    "worker_module": "baseline_worker",
+    "requests": 2000,
+    "concurrency": 32,
+    "p50": 0.05748245003633201,
+    "p90": 0.06511314995586873,
+    "p95": 0.06944494002964346,
+    "p99": 0.07582963593304157,
+    "avg": 0.05868116330332123,
+    "throughput_rps": 539.7157754409805,
+    "wall_time_s": 3.7056541442871094
+  },
+  "optimized": {
+    "worker_module": "optimized_worker",
+    "requests": 2000,
+    "concurrency": 32,
+    "p50": 0.0030480498680844903,
+    "p90": 0.003701520012691617,
+    "p95": 0.004001529852394014,
+    "p99": 0.013039689981378614,
+    "avg": 0.003182203347212635,
+    "throughput_rps": 9338.013133273,
+    "wall_time_s": 0.21417832374572754
+  },
+  "derived": {
+    "throughput_speedup": 17.301723533360274,
+    "baseline_log_lines": 2200,
+    "optimized_log_lines": 2200
+  }
+}

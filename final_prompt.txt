@@ -1,0 +1,146 @@
+Role & Objective
+You are a senior backend engineer tasked with optimizing a small Python service for latency and throughput under concurrent load. Your objective is to design and implement an optimized worker that preserves the baseline worker’s externally visible behavior while significantly improving tail latency and throughput for the workload driven by runner.py. You must not modify the baseline files; instead, you will add new code and provide a reproducible benchmark and report comparing baseline and optimized performance.
+
+Inputs & Context
+- Baseline code consists of exactly two existing Python files:
+  - baseline_worker.py: processes jobs and appends structured JSON lines to a log file.
+  - runner.py: generates a fixed workload, runs a chosen worker module under concurrency, and reports latency/throughput.
+- Both baseline_worker.py and runner.py are immutable and must not be modified.
+- runner.py defines the workload model (job counts, concurrency, warm-up, metrics) and is the single source of truth for how the service is exercised.
+- The workload driven by runner.py must be used unchanged to evaluate both the baseline worker and the optimized worker.
+
+Step-by-Step Instructions
+1. Analyze Baseline Behavior
+- Read baseline_worker.py and runner.py to understand:
+  - The function signature and behavior expected of the worker (e.g., handle_request(job_id, payload, log_path)).
+  - How runner.py imports or invokes the worker, how it passes job parameters and log file paths, and how it measures latency and throughput.
+  - The structure and content of the log records written by baseline_worker.py (JSON line format, key fields, ordering constraints, and any metadata).
+- Treat the current behavior of baseline_worker.py under runner.py as the specification for correctness; your optimized worker must be logically equivalent with respect to job processing and logging.
+
+2. Define Invariants and Correctness Requirements
+- Ensure the optimized worker for the runner.py workload:
+  - Processes the same set of jobs that the baseline worker processes.
+  - Produces logically equivalent log records (same semantic information and structure per job as baseline_worker.py) in a compatible JSON lines format.
+  - Preserves any required ordering guarantees and error-handling behavior that are externally observable through logs or return values.
+- Confirm that no changes are made to:
+  - The number of jobs processed.
+  - The semantics of the work performed per job.
+  - The way runner.py measures and reports performance.
+
+3. Design the Optimized Worker
+- Create a new Python module, for example optimized_worker.py, that exposes a worker entry point compatible with how runner.py selects and calls the baseline worker. The optimized worker’s public interface must match the expected function signature (such as handle_request(job_id, payload, log_path)), or integrate in whatever explicit way runner.py is designed to select a worker implementation.
+- Design the optimized implementation to reduce contention and I/O overhead while keeping the same logical work. Possible approaches include (but are not limited to):
+  - Buffering and batching log writes in memory, flushing to disk in larger chunks rather than per job.
+  - Using a background logging thread or worker that consumes a queue of log events from the main request-handling path.
+  - Narrowing lock scope or using finer-grained synchronization so that concurrent jobs spend less time blocked on shared resources.
+  - Minimizing unnecessary file open/close cycles and flushes while still ensuring durability consistent with the baseline’s externally visible behavior.
+- Do not implement any “cheats” such as:
+  - Reducing the number of jobs processed.
+  - Omitting disk writes entirely.
+  - Faking or intercepting timing or metrics.
+  - Modifying how runner.py counts work, measures latency, or reports results.
+
+4. Implement the Optimized Worker
+- Implement the optimized worker in optimized_worker.py (and auxiliary modules if needed) using only the Python standard library.
+- Ensure that all work performed per job is semantically equivalent to the baseline, including:
+  - Computation logic.
+  - Log message contents and structure.
+  - Any side effects observable through runner.py’s existing mechanisms.
+- Implement concurrency-safe buffering or batching mechanisms for logging, for example:
+  - A thread-safe queue of log records.
+  - A dedicated background thread that consumes from the queue and writes to the log file with fewer, larger writes, while still using a structured JSON-lines format equivalent to the baseline.
+- Ensure safe shutdown semantics:
+  - All queued log records must be flushed to disk before the optimized worker run is considered complete.
+  - The lifetime of background logging threads or resources must be properly managed so that ./run_tests and runner.py do not exit before all data is written.
+
+5. Integrate Optimized Worker with runner.py
+- Use the existing mechanisms (such as environment variables, module selection flags, or import indirection) to allow runner.py to run either the baseline worker or the optimized worker without modifying runner.py itself.
+- If runner.py expects a specific module name or function, provide the necessary module and function names in optimized_worker.py so that runner.py can be configured or invoked to use it.
+- Ensure that switching between baseline and optimized workers requires only changes to how the code is invoked or configured, not edits to runner.py.
+
+6. Create the Benchmark Script `run_tests`
+- At the repository root, add an executable script named run_tests that can be run as:
+  - On Unix-like systems: ./run_tests
+  - On Windows: python run_tests (if necessary for cross-platform execution, implement run_tests as a Python script).
+- In run_tests, implement the following steps:
+  - Run the baseline implementation via runner.py under the standard workload defined by runner.py.
+  - Capture baseline metrics including throughput (jobs per second), latency percentiles (at least P50, P90, P95, P99), average latency, and total wall-clock time.
+  - Run the optimized implementation via runner.py using the exact same workload parameters and environment.
+  - Capture optimized metrics with the same fields (throughput, latency percentiles, average latency, wall-clock time).
+- Ensure that run_tests:
+  - Exits with a non-zero status code if any run fails, if required artifacts (such as log files or metrics) are missing, or if basic correctness checks between baseline and optimized outputs fail.
+  - Optionally performs simple consistency checks, such as comparing the count of log records between baseline and optimized runs, and verifying that the sets of job identifiers match.
+- Implement all logic in run_tests using only the Python standard library and without modifying baseline_worker.py or runner.py.
+
+7. Implement Metrics Collection and Reporting
+- Use the output of runner.py (or additional measurement code you legally add around runner.py without modifying it) to compute, for both baseline and optimized runs:
+  - Throughput in jobs per second.
+  - Latency percentiles: at least P50, P90, P95, P99.
+  - Average (mean) latency.
+  - Total wall-clock time for each run.
+- After running both baseline and optimized workers, compute simple derived metrics such as:
+  - Throughput speedup factor (optimized throughput divided by baseline throughput).
+  - Relative improvements in P95 and P99 latency.
+- Print a human-readable summary to stdout that includes, at minimum, for both baseline and optimized implementations:
+  - Throughput.
+  - P50, P90, P95, P99 latencies.
+  - Average latency.
+  - Wall-clock time.
+  - Derived speedup metrics.
+
+8. Generate `perf_report.json`
+- From within run_tests, create a machine-readable JSON file named perf_report.json at the repository root.
+- Define a compact and clear JSON structure, such as:
+  - A top-level object containing:
+    - A baseline section with fields for throughput, latency percentiles, average latency, and wall-clock time.
+    - An optimized section with the same fields.
+    - A derived section containing speedup factors and differences.
+- Ensure the JSON includes at least:
+  - Baseline metrics (latency percentiles, throughput, wall-clock time).
+  - Optimized metrics using the same fields.
+  - Simple derived numbers such as:
+    - Throughput speedup.
+    - Latency ratio or delta for at least one high percentile (e.g., P95, P99).
+- Write perf_report.json in UTF-8 encoding and keep it small and obvious so that automated checkers can parse it easily.
+
+9. Add Documentation in `README.md`
+- At the repository root, create or update README.md with a concise description of:
+  - The baseline architecture and its main performance bottlenecks (for example, contention and overhead due to frequent, synchronized writes to the log file under a global lock).
+  - The high-level design of the optimized worker, using clear but high-level language rather than step-by-step operational instructions.
+  - The main ideas behind the optimization, such as batched logging, background flushers, reduced lock contention, or more efficient concurrency patterns.
+- In README.md, document how to reproduce results on a clean machine with Python 3, including:
+  - How to (optionally) create and activate a virtual environment (for example, using python -m venv <VENV_PATH> and the appropriate activation command for the platform).
+  - How to run the baseline path using runner.py.
+  - How to run the optimized path using runner.py.
+  - How to run the unified one-command benchmark via ./run_tests or python run_tests.
+- Include in README.md a short comparison (e.g., a small table or bullet list) showing measured results on your own machine, including at least:
+  - Baseline throughput and key latency percentiles.
+  - Optimized throughput and the same latency percentiles.
+  - A concise statement of the observed speedup.
+
+10. Reproducibility and Environment
+- Ensure that the entire solution works on a fresh environment with Python 3 and no third-party packages.
+- Avoid any external dependencies beyond the Python standard library.
+- Do not require any manual edits to baseline_worker.py or runner.py.
+- Ensure that paths, file names, and commands used in run_tests and README.md match the repository layout.
+
+Constraints & Preferences
+- Do not modify baseline_worker.py or runner.py under any circumstances.
+- Use only the Python standard library.
+- Preserve the logical behavior and output semantics of the baseline worker, including log structure and job processing logic.
+- Do not reduce the number of jobs, remove disk writes entirely, alter runner.py’s workload, or fake timing/metrics.
+- Focus improvements on genuine engineering optimizations such as reduced I/O per job, fewer contended locks, and more efficient concurrency.
+- Keep the code simple, readable, and maintainable.
+- Ensure run_tests is easy to execute in one command from the repository root.
+- Use clear, concise English in README.md and console output.
+
+Quality Gates
+- Verify correctness by:
+  - Checking that the optimized worker processes the same set of jobs and produces logically equivalent log records compared to the baseline.
+  - Ensuring that basic log statistics (e.g., record counts and job ID coverage) match between baseline and optimized runs.
+- Verify performance improvement by:
+  - Confirming that the optimized worker demonstrates clearly better tail latency (at least at P95 and P99) and higher throughput than the baseline for the same runner.py workload.
+- Verify reproducibility by:
+  - Running ./run_tests (or python run_tests) on a clean Python 3 environment and confirming that it successfully runs both baseline and optimized implementations, prints metrics, and writes perf_report.json.
+- Treat the baseline behavior under runner.py as the definitive spec and ensure the optimized path remains consistent with it.
+- Place critical compliance instructions last: Do not modify baseline_worker.py or runner.py, do not use third-party packages, do not cheat on the workload or metrics, and ensure that all improvements come from genuine performance engineering while preserving correct behavior.

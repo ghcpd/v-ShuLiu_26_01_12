@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Run baseline and optimized benchmarks and produce a small JSON report.
+
+This script runs `runner.py` for the baseline worker and for `optimized_worker`,
+validates that both produced the expected log lines, prints a compact human
+summary, and writes `perf_report.json`.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+from runner import (
+    BASELINE_LOG_FILE,
+    OPTIMIZED_LOG_FILE,
+    LOG_DIR,
+    TOTAL_REQUESTS,
+    WARMUP_REQUESTS,
+)
+
+ROOT = os.path.dirname(__file__)
+BASE_METRICS = os.path.join(ROOT, "baseline_metrics.json")
+OPT_METRICS = os.path.join(ROOT, "optimized_metrics.json")
+REPORT = os.path.join(ROOT, "perf_report.json")
+
+EXPECTED_LOG_LINES = TOTAL_REQUESTS + WARMUP_REQUESTS
+
+
+def _run_worker(worker_name: str, out_json: str) -> None:
+    cmd = [sys.executable, os.path.join(ROOT, "runner.py"), "--worker", worker_name, "--output-json", out_json]
+    print("Running:", " ".join(cmd))
+    res = subprocess.run(cmd)
+    if res.returncode != 0:
+        print(f"Error: runner failed for {worker_name} (exit {res.returncode})")
+        sys.exit(1)
+
+
+def _count_lines(path: str) -> int:
+    if not os.path.exists(path):
+        return 0
+    with open(path, "r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
+
+
+def _read_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def main() -> None:
+    # Clean logs to ensure a fresh run.
+    if os.path.exists(LOG_DIR):
+        shutil.rmtree(LOG_DIR)
+
+    # Baseline
+    _run_worker("baseline_worker", BASE_METRICS)
+
+    baseline_lines = _count_lines(BASELINE_LOG_FILE)
+    if baseline_lines != EXPECTED_LOG_LINES:
+        print(f"Error: baseline log has {baseline_lines} lines, expected {EXPECTED_LOG_LINES}")
+        sys.exit(1)
+
+    # Optimized
+    _run_worker("optimized_worker", OPT_METRICS)
+
+    optimized_lines = _count_lines(OPTIMIZED_LOG_FILE)
+    if optimized_lines != EXPECTED_LOG_LINES:
+        print(f"Error: optimized log has {optimized_lines} lines, expected {EXPECTED_LOG_LINES}")
+        sys.exit(1)
+
+    baseline = _read_json(BASE_METRICS)
+    optimized = _read_json(OPT_METRICS)
+
+    # Basic validation
+    if baseline.get("requests") != TOTAL_REQUESTS or optimized.get("requests") != TOTAL_REQUESTS:
+        print("Error: unexpected 'requests' field in runner output JSON")
+        sys.exit(1)
+
+    # Derived numbers
+    speedup = None
+    try:
+        speedup = optimized["throughput_rps"] / baseline["throughput_rps"]
+    except Exception:
+        speedup = None
+
+    report = {
+        "baseline": baseline,
+        "optimized": optimized,
+        "derived": {
+            "throughput_speedup": speedup,
+            "baseline_log_lines": baseline_lines,
+            "optimized_log_lines": optimized_lines,
+        },
+    }
+
+    with open(REPORT, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    # Print a concise human summary
+    def fmt(m):
+        return (
+            f"throughput={m['throughput_rps']:.2f} rps",
+            f"p50={m['p50']:.6f}s",
+            f"p90={m['p90']:.6f}s",
+            f"p95={m['p95']:.6f}s",
+            f"p99={m['p99']:.6f}s",
+            f"avg={m['avg']:.6f}s",
+        )
+
+    print("\nResults")
+    print("-------")
+    print("Baseline:", " ".join(fmt(baseline)))
+    print("Optimized:", " ".join(fmt(optimized)))
+    if speedup:
+        print(f"Speedup (throughput): {speedup:.2f}x")
+
+    print(f"Written machine report: {REPORT}")
+
+
+if __name__ == "__main__":
+    main()
