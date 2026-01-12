@@ -1,0 +1,3 @@
+#!/bin/bash
+# Unix/Linux shell wrapper for run_tests
+python3 run_tests.py "$@"
