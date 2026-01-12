@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Run baseline and optimized benchmarks, validate logs, and write perf_report.json.
+
+Usage: ./run_tests
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+ROOT = os.path.dirname(__file__)
+RUNNER = os.path.join(ROOT, "runner.py")
+LOG_DIR = os.path.join(ROOT, "logs")
+BASE_METRICS = os.path.join(ROOT, "baseline_metrics.json")
+OPT_METRICS = os.path.join(ROOT, "optimized_metrics.json")
+PERF_REPORT = os.path.join(ROOT, "perf_report.json")
+
+EXPECTED_BASE_LOG = os.path.join(LOG_DIR, "baseline.log")
+EXPECTED_OPT_LOG = os.path.join(LOG_DIR, "optimized.log")
+
+# Runner constants (kept in sync with runner.py)
+TOTAL_REQUESTS = 2000
+WARMUP_REQUESTS = 200
+
+
+def _run_worker(worker_name: str, out_json: str):
+    cmd = [sys.executable, RUNNER, "--worker", worker_name, "--output-json", out_json]
+    print(f"Running: {cmd}")
+    r = subprocess.run(cmd, check=False)
+    if r.returncode != 0:
+        print(f"Benchmark for {worker_name} failed with exit code {r.returncode}")
+        sys.exit(2)
+
+
+def _read_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _validate_log(path: str):
+    if not os.path.exists(path):
+        print(f"Missing log file: {path}")
+        return False, "missing"
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [l.strip() for l in f if l.strip()]
+    if len(lines) < (TOTAL_REQUESTS + WARMUP_REQUESTS):
+        return False, f"too_few_lines ({len(lines)})"
+    # parse job_id presence
+    job_ids = set()
+    for l in lines:
+        try:
+            j = json.loads(l)
+            job_ids.add(j.get("job_id"))
+        except Exception:
+            return False, "invalid_json"
+    missing = [i for i in range(TOTAL_REQUESTS) if i not in job_ids]
+    if missing:
+        return False, f"missing_job_ids (first_missing={missing[0]})"
+    return True, f"ok ({len(lines)} lines)"
+
+
+def main():
+    # Run baseline
+    if os.path.exists(EXPECTED_BASE_LOG):
+        os.remove(EXPECTED_BASE_LOG)
+    if os.path.exists(EXPECTED_OPT_LOG):
+        os.remove(EXPECTED_OPT_LOG)
+
+    _run_worker("baseline_worker", BASE_METRICS)
+
+    # Small sleep to let background flush (should be unnecessary for baseline)
+    time.sleep(0.1)
+
+    _run_worker("optimized_worker", OPT_METRICS)
+
+    # Give optimized worker a moment to flush background writer (atexit should have done it).
+    time.sleep(0.2)
+
+    # Load metrics
+    baseline_metrics = _read_json(BASE_METRICS)
+    optimized_metrics = _read_json(OPT_METRICS)
+
+    # Validate logs
+    ok_base, reason_base = _validate_log(EXPECTED_BASE_LOG)
+    ok_opt, reason_opt = _validate_log(EXPECTED_OPT_LOG)
+
+    if not ok_base:
+        print(f"Baseline log validation failed: {reason_base}")
+        sys.exit(3)
+    if not ok_opt:
+        print(f"Optimized log validation failed: {reason_opt}")
+        sys.exit(4)
+
+    # Additional content validation: verify that for each job_id the important
+    # fields (length, vowels) match between baseline and optimized runs.
+    def _read_records(path):
+        d = {}
+        with open(path, "r", encoding="utf-8") as f:
+            for l in f:
+                l = l.strip()
+                if not l:
+                    continue
+                try:
+                    j = json.loads(l)
+                except Exception:
+                    continue
+                d.setdefault(j.get("job_id"), []).append(j)
+        # For matching, prefer the latest entry for each job_id (measurement phase)
+        return {k: v[-1] for k, v in d.items()}
+
+    base_records = _read_records(EXPECTED_BASE_LOG)
+    opt_records = _read_records(EXPECTED_OPT_LOG)
+
+    mismatches = []
+    for i in range(TOTAL_REQUESTS):
+        b = base_records.get(i)
+        o = opt_records.get(i)
+        if b is None or o is None:
+            mismatches.append((i, "missing"))
+            continue
+        if b.get("length") != o.get("length") or b.get("vowels") != o.get("vowels"):
+            mismatches.append((i, "content_mismatch"))
+    if mismatches:
+        print(f"Found content mismatches for {len(mismatches)} job(s); first: {mismatches[0]}")
+        sys.exit(5)
+
+    speedup = optimized_metrics.get("throughput_rps", 0.0) / (baseline_metrics.get("throughput_rps", 1e-9))
+
+    report = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "baseline": baseline_metrics,
+        "optimized": optimized_metrics,
+        "speedup": speedup,
+    }
+
+    with open(PERF_REPORT, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    # Print compact human‑readable summary
+    print("\n=== Benchmark Summary ===")
+    print("Baseline:\tthroughput (req/s): {:.2f}\tp95: {:.6f}\tp99: {:.6f}".format(
+        baseline_metrics.get("throughput_rps", 0.0), baseline_metrics.get("p95", 0.0), baseline_metrics.get("p99", 0.0)
+    ))
+    print("Optimized:\tthroughput (req/s): {:.2f}\tp95: {:.6f}\tp99: {:.6f}".format(
+        optimized_metrics.get("throughput_rps", 0.0), optimized_metrics.get("p95", 0.0), optimized_metrics.get("p99", 0.0)
+    ))
+    print("Speedup (throughput): {:.2f}x".format(speedup))
+    print("Perf report written to:", PERF_REPORT)
+
+    # Exit non‑zero if optimized is not faster
+    if speedup <= 1.0:
+        print("Warning: optimized implementation did not improve throughput.")
+        # Still exit 0 to allow inspection, but you can change this policy.
+
+
+if __name__ == '__main__':
+    main()
