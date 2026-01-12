@@ -75,8 +75,8 @@ Make it clear how to reproduce your results on a clean machine with Python 3:
   * The baseline path.
   * The optimized path.
   * The unified `./run_tests` command.
-* Summarize, in that README, the main bottlenecks you observed and the key ideas behind your optimization,用比较高层的语言，不需要写成操作手册。
-* Include一个简短的小表或项目符号，展示你自己机器上测到的前后对比（吞吐和若干延迟分位数）。
+* Summarize in the README the main bottlenecks you observed and the key ideas behind your optimization, using high‑level language rather than a step‑by‑step manual.
+* Include a small table or a short list of bullet points showing the before/after results measured on your own machine (throughput and several latency percentiles).
 
 In addition to console output, `./run_tests` must write a machine‑readable JSON file named `perf_report.json` at the repository root with, at minimum:
 
@@ -98,7 +98,6 @@ Your submission will be evaluated on:
 * **Honesty of evidence** – metrics and reports are consistent with what the code actually does.
 
 Assume this could run in production under strict latency SLOs. Do not weaken the workload or modify the baseline files; focus on making the same work execute faster and more efficiently.
-
 
 GitHub Copilot: I'll help you optimize this Python service for better performance under concurrent load. Let me start by examining the baseline files to understand the current implementation. 
 
