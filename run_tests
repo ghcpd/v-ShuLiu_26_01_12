@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Run baseline and optimized benchmarks, validate outputs, and produce a JSON report.
+
+Usage: ./run_tests
+
+This script is intentionally self-contained and uses only the standard library.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from typing import Any, Dict, Tuple
+
+ROOT = Path(__file__).resolve().parent
+RUNNER = [sys.executable, str(ROOT / "runner.py")]
+LOGS = ROOT / "logs"
+BASE_JSON = ROOT / "baseline_run.json"
+OPT_JSON = ROOT / "optimized_run.json"
+REPORT = ROOT / "perf_report.json"
+
+
+def run_worker(worker: str, out_json: Path) -> Dict[str, Any]:
+    cmd = RUNNER + ["--worker", worker, "--output-json", str(out_json)]
+    print("Running:", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    print(proc.stdout)
+    if proc.returncode != 0:
+        print(proc.stderr, file=sys.stderr)
+        raise SystemExit(f"runner.py failed for {worker} (exit {proc.returncode})")
+    if not out_json.exists():
+        raise SystemExit(f"Expected output JSON not found: {out_json}")
+    return json.loads(out_json.read_text(encoding="utf-8"))
+
+
+def read_log(path: Path) -> Dict[int, Dict[str, Any]]:
+    if not path.exists():
+        raise SystemExit(f"Missing log file: {path}")
+    out: Dict[int, Dict[str, Any]] = {}
+    with path.open("r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise SystemExit(f"Invalid JSON in {path} line {i+1}: {e}")
+            jid = int(obj.get("job_id"))
+            out[jid] = obj
+    return out
+
+
+def compare_logs(baseline_path: Path, opt_path: Path) -> None:
+    base = read_log(baseline_path)
+    opt = read_log(opt_path)
+    if set(base.keys()) != set(opt.keys()):
+        missing = set(base.keys()) - set(opt.keys())
+        extra = set(opt.keys()) - set(base.keys())
+        raise SystemExit(f"Log job_id mismatch. missing={sorted(missing)[:5]} extra={sorted(extra)[:5]}")
+
+    # For each job compare the deterministically computed fields.  Note:
+    # `payload_hash` uses Python's randomized string hash and can differ
+    # between processes, so we only assert on fields that are stable
+    # across processes (`length`, `vowels`, `job_id`).
+    for jid, bref in base.items():
+        oref = opt[jid]
+        for field in ("length", "vowels", "job_id"):
+            if bref.get(field) != oref.get(field):
+                raise SystemExit(f"Log mismatch for job {jid} field {field}: baseline={bref.get(field)} optimized={oref.get(field)}")
+
+
+def summarize_metrics(baseline: Dict[str, Any], optimized: Dict[str, Any]) -> Dict[str, Any]:
+    def pick(m: Dict[str, Any]):
+        return {k: m[k] for k in ("p50", "p90", "p95", "p99", "avg", "throughput_rps", "wall_time_s")} 
+
+    b = pick(baseline)
+    o = pick(optimized)
+    speedup = o["throughput_rps"] / b["throughput_rps"] if b["throughput_rps"] > 0 else None
+    return {"baseline": b, "optimized": o, "throughput_speedup": speedup}
+
+
+def main() -> None:
+    os.chdir(ROOT)
+    LOGS.mkdir(exist_ok=True)
+
+    # Run baseline then optimized
+    baseline_metrics = run_worker("baseline_worker", BASE_JSON)
+    optimized_metrics = run_worker("optimized_worker", OPT_JSON)
+
+    # Validate logs
+    baseline_log = LOGS / "baseline.log"
+    optimized_log = LOGS / "optimized.log"
+    compare_logs(baseline_log, optimized_log)
+
+    # Summarize and emit report
+    summary = summarize_metrics(baseline_metrics, optimized_metrics)
+    REPORT.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    # Human readable output
+    print("\n=== Performance summary ===")
+    print(textwrap.dedent(f"""
+        Baseline  : {baseline_metrics['throughput_rps']:.2f} req/s, p95={baseline_metrics['p95']:.6f}s, p99={baseline_metrics['p99']:.6f}s
+        Optimized : {optimized_metrics['throughput_rps']:.2f} req/s, p95={optimized_metrics['p95']:.6f}s, p99={optimized_metrics['p99']:.6f}s
+
+        Throughput speedup: {summary['throughput_speedup']:.2f}x
+    """))
+
+    print(f"Wrote machine report: {REPORT}")
+    print("Quick validation: logs contain the same job_ids and deterministic fields (length, vowels). ✅")
+    print("To reproduce: see README.md")
+    # Exit non-zero if optimized is not faster in throughput or p99 isn't improved.
+    fail = False
+    if optimized_metrics["throughput_rps"] <= baseline_metrics["throughput_rps"]:
+        print("Warning: optimized throughput is NOT higher than baseline", file=sys.stderr)
+        fail = True
+    if optimized_metrics["p99"] >= baseline_metrics["p99"]:
+        print("Warning: optimized p99 is NOT lower than baseline", file=sys.stderr)
+        fail = True
+
+    if fail:
+        print("One or more performance gates failed; see details above.")
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()
