@@ -1,0 +1,171 @@
+1. Role & Objective
+You are a senior backend engineer and performance optimizer. Your objective is to design, implement, and benchmark an optimized Python worker for a latency‑sensitive, concurrent service, starting from an existing baseline implementation. The optimized solution must preserve the observable behavior and outputs of the baseline under the fixed workload driven by runner.py, while significantly improving tail latency (P95/P99) and throughput under concurrent load.
+
+2. Inputs & Context
+- You are given a small Python repository that initially contains exactly two files:
+  - baseline_worker.py – processes jobs and appends structured JSON lines to a log file.
+  - runner.py – generates a fixed workload, runs a chosen worker module under concurrency, and reports latency/throughput metrics.
+- The workload characteristics and measurement logic are fully defined in runner.py and must be treated as part of the specification:
+  - It calls handle_request(job_id, payload, log_path) on the selected worker module.
+  - It uses a fixed number of total requests, a warm‑up phase, and fixed concurrency.
+  - It measures per‑request latency and overall throughput and prints metrics to stdout.
+- The baseline behavior is the reference spec:
+  - For each job, the baseline performs deterministic computation on the payload and appends a JSON record to a log file.
+  - When the baseline worker is run through runner.py, you observe:
+    - High P95/P99 latency for individual jobs.
+    - Lower‑than‑desired throughput (jobs per second).
+    - A lot of time spent opening, writing, flushing, and syncing the log file under a global lock for every request.
+- The repository root is the current working directory. You must not assume any third‑party dependencies beyond the Python standard library.
+
+3. Step‑by‑Step Instructions
+
+3.1 Analyze the Baseline
+- Read baseline_worker.py and identify:
+  - The signature and behavior of handle_request(job_id, payload, log_path).
+  - How it computes its result (e.g., any deterministic slow_compute or equivalent logic).
+  - How it constructs each log record (field names, types, and values) and writes it to disk.
+  - How it manages file I/O (including opening, writing, flushing, syncing, and closing the log file) and any global locks.
+- Read runner.py and identify:
+  - How it imports and calls the worker module.
+  - The fixed workload parameters (number of warm‑up requests, total requests, concurrency level, logging paths, and any log file naming conventions).
+  - How it measures latency and throughput (including how it computes P50, P90, P95, P99, averages, and throughput in req/s).
+  - How it separates warm‑up from measurement.
+
+3.2 Design the Optimized Worker
+- Design an alternative worker implementation in one or more new Python modules (for example, optimized_worker.py) that exposes a function with a fully compatible interface:
+  - handle_request(job_id: int, payload: str, log_path: str) -> dict
+- Ensure the optimized worker satisfies all of the following logical‑equivalence requirements:
+  - For the same job_id and payload, it performs the same deterministic computation as the baseline (e.g., same length/vowel counts or equivalent logic) so that returned results match the baseline for the runner.py workload.
+  - It writes log records that are logically equivalent to the baseline’s JSON lines for the same sequence of jobs:
+    - Same set of jobs logged.
+    - Same key fields and value semantics (job_id, payload‑derived values, timestamps, etc.), though you may differ in formatting details that do not change meaning.
+  - It processes exactly the same set of jobs that runner.py issues, with no jobs skipped, merged, or faked.
+- Focus on genuine engineering improvements in I/O and concurrency while preserving semantics:
+  - Reduce per‑request I/O cost and log‑related contention (e.g., avoid opening, writing, flushing, and syncing on every request under a single global lock).
+  - Use only Python’s standard library to implement strategies such as:
+    - Buffered logging or batched writes.
+    - Background flushing threads or worker queues.
+    - Reduced lock granularity or lock‑free structures where safe and applicable.
+    - Any other techniques that preserve the correctness of computation and logging while improving latency and throughput.
+  - Do not reduce the number of jobs, drop disk writes entirely, intercept or fake timing, or change how runner.py measures performance.
+
+3.3 Implement the Optimized Worker
+- Implement the optimized worker module(s) with at least the following properties:
+  - A public function handle_request(job_id, payload, log_path) matching the baseline signature.
+  - Deterministic computation that mirrors the baseline’s logic so that outputs are comparable.
+  - Log writing mechanics that:
+    - Ultimately write a logically equivalent JSON line per processed job to the file at log_path.
+    - Reduce the amount of I/O and contention per job compared to the baseline (for example via batching, in‑memory queues, background flusher threads, or similar mechanisms).
+  - All concurrency and synchronization must be safe under the fixed concurrency level used by runner.py.
+- Ensure that runner.py can select the optimized worker simply by specifying its module name via the existing mechanism (e.g., via --worker optimized_worker), without any changes to runner.py itself.
+
+3.4 Implement the One‑Command Benchmark Script
+- At the repository root, create an executable script named run_tests (for example, a Python script that can be executed as ./run_tests on Unix‑like systems and via python run_tests on Windows) that does the following when run from the repository root:
+  - Uses the existing runner.py without modification to execute two benchmark runs:
+    1) Baseline run:
+       - Invoke runner.py with the baseline worker module (e.g., --worker baseline_worker).
+       - Use the log path that runner.py would normally use for the baseline (e.g., logs/baseline.log if that is the convention inside runner.py).
+    2) Optimized run:
+       - Invoke runner.py with the optimized worker module (e.g., --worker optimized_worker).
+       - Use the distinct optimized log file path that runner.py expects (e.g., logs/optimized.log).
+  - Ensure that both runs use the same workload settings as defined in runner.py (same number of total requests, same warm‑up phase, same concurrency, etc.). Do not modify these parameters.
+  - Capture, for each run, the following metrics derived from runner.py’s measurement phase:
+    - P50, P90, P95, P99 latency in seconds.
+    - Average latency in seconds.
+    - Throughput in requests per second (req/s).
+    - Total wall‑clock time in seconds for the measured phase.
+  - Present human‑readable output for both runs, showing at minimum:
+    - Worker name.
+    - Number of requests and concurrency.
+    - Latency percentiles (P50, P90, P95, P99) and average, clearly labeled and in consistent units.
+    - Throughput (req/s).
+    - Wall‑clock time (s).
+  - After both runs, print a comparison summary that highlights improvements of the optimized worker over the baseline for:
+    - Throughput.
+    - P50, P90, P95, and P99 latencies.
+    - Average latency.
+- Implement simple correctness checks inside run_tests:
+  - Verify that both the baseline and optimized log files exist.
+  - Count the number of non‑empty log lines in each file and report them.
+  - If these counts differ, print a warning or treat this as an error condition, as appropriate.
+- Ensure run_tests exits with a non‑zero status code if:
+  - Any of the benchmark runs fails (non‑zero exit code from runner.py).
+  - Required artifacts (logs or metrics) are missing or malformed.
+
+3.5 Generate Machine‑Readable Performance Report
+- As part of run_tests execution, create a JSON file named perf_report.json at the repository root.
+- The JSON report must contain, at minimum, the following information:
+  - baseline: an object with fields including:
+    - worker_module (baseline worker module name)
+    - requests (number of measured requests)
+    - concurrency (concurrency used)
+    - p50, p90, p95, p99 (latency percentiles in seconds)
+    - avg (average latency in seconds)
+    - throughput_rps (requests per second)
+    - wall_time_s (total wall‑clock time in seconds)
+  - optimized: an object with the same fields for the optimized worker run.
+  - comparison: an object that includes simple derived metrics such as:
+    - throughput_improvement (e.g., percentage increase or factor of speedup in throughput).
+    - p50_improvement, p95_improvement, p99_improvement (e.g., percentage reduction in latency).
+- Keep the JSON structure small, obvious, and easy to parse for automated checkers.
+
+3.6 Documentation (README.md)
+- At the repository root, create or update a short README.md that:
+  - Briefly explains the baseline and optimized architectures at a high level (no need to be an operations manual).
+  - Describes how to set up a minimal environment with Python 3 (for example, using a virtual environment) without relying on third‑party packages.
+  - Provides concrete commands to run:
+    - The baseline path through runner.py.
+    - The optimized path through runner.py.
+    - The unified benchmark command via ./run_tests (or the OS‑appropriate equivalent such as python run_tests).
+  - Summarizes, in higher‑level language, the main bottlenecks identified in the baseline (e.g., per‑request I/O under a global lock) and the key ideas behind your optimization (e.g., batching, background flushers, reduced lock scope).
+  - Includes a concise comparison of before‑and‑after performance as either a small table or bullet list, showing on your machine:
+    - Baseline vs optimized throughput (req/s).
+    - Selected latency percentiles (at least P50, P90, P95, P99) and averages for both implementations.
+
+4. Output Specification
+- Optimized worker module(s):
+  - One or more new Python files (e.g., optimized_worker.py) that can be imported by runner.py via its existing module selection mechanism and that expose handle_request(job_id, payload, log_path) with the required semantics.
+- Benchmark script:
+  - An executable script at the repository root named run_tests that:
+    - Runs both baseline and optimized workers through runner.py under the same workload.
+    - Prints human‑readable metrics for both runs.
+    - Exits with a non‑zero status code on failure conditions.
+- JSON performance report:
+  - A file named perf_report.json at the repository root containing baseline, optimized, and comparison metrics as specified above.
+- Documentation:
+  - A README.md at the repository root with clear instructions, high‑level explanations, and a small table or bullet summary comparing performance before and after optimization.
+
+5. Constraints & Preferences
+- Do not modify baseline_worker.py or runner.py under any circumstances.
+- Use only the Python standard library; do not require or import any third‑party packages.
+- Treat the behavior of baseline_worker.py under runner.py’s workload as the specification:
+  - The optimized worker must preserve the logical outputs and log records for that workload.
+  - Only speed and efficiency may change.
+- Do not:
+  - Reduce the number of jobs processed.
+  - Remove disk writes entirely.
+  - Intercept, fake, or alter timing measurements.
+  - Change how runner.py measures performance.
+- You may change how work is scheduled, batched, or flushed, but not what work is done.
+- Keep the code simple, readable, and maintainable, favoring clear concurrency patterns and robust error handling over micro‑optimizations.
+
+6. Quality Gates
+- Correctness:
+  - The optimized worker must pass the same runner.py workload without errors.
+  - The number of logged records for the optimized implementation must match the baseline for the full workload (warm‑up plus measured requests), unless explicitly justified.
+  - Returned result dictionaries from handle_request must be logically equivalent to the baseline for the same inputs.
+- Performance:
+  - Demonstrate clear improvement in tail latency (at least P95 and P99) and throughput under the fixed workload.
+  - Show metrics in both human‑readable output and perf_report.json.
+- Reproducibility:
+  - A new user with Python 3 and the repository contents should be able to:
+    - Run the baseline and optimized workers via runner.py.
+    - Run ./run_tests (or python run_tests) to reproduce your benchmark results and generate perf_report.json.
+- Honesty of Evidence:
+  - Ensure that metrics and reports accurately reflect what the code actually does, with no hidden shortcuts or measurement manipulation.
+
+7. Critical Compliance Instructions (High Priority)
+- Never modify baseline_worker.py or runner.py.
+- Never rely on third‑party libraries; use only Python’s standard library.
+- Always preserve the logical behavior, outputs, and logging semantics of the baseline for the runner.py workload; only improve performance through genuine engineering techniques such as batching, buffering, and better concurrency.
+- Ensure that the entire task is completable in a single run of the model without requiring follow‑up interactions or clarification.

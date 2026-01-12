@@ -1,0 +1,32 @@
+{
+  "baseline": {
+    "worker_module": "baseline_worker",
+    "requests": 2000,
+    "concurrency": 32,
+    "p50": 0.055561,
+    "p90": 0.061789,
+    "p95": 0.065843,
+    "p99": 0.090574,
+    "avg": 0.057069,
+    "throughput_rps": 554.58,
+    "wall_time_s": 3.606
+  },
+  "optimized": {
+    "worker_module": "optimized_worker",
+    "requests": 2000,
+    "concurrency": 32,
+    "p50": 0.00301,
+    "p90": 0.003664,
+    "p95": 0.003878,
+    "p99": 0.01411,
+    "avg": 0.003176,
+    "throughput_rps": 9377.68,
+    "wall_time_s": 0.213
+  },
+  "comparison": {
+    "throughput_improvement": 1590.9517112048757,
+    "p50_improvement": 1745.8803986710961,
+    "p95_improvement": 1597.859721505931,
+    "p99_improvement": 541.913536498937
+  }
+}
