@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+Run both baseline and optimized benchmarks, verify logs, and produce a perf_report.json
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+LOG_DIR = ROOT / "logs"
+BASE_METRICS = ROOT / "baseline_metrics.json"
+OPT_METRICS = ROOT / "optimized_metrics.json"
+PERF_REPORT = ROOT / "perf_report.json"
+
+RUNNER = [sys.executable, str(ROOT / "runner.py")]
+
+# Clean previous artifacts
+if LOG_DIR.exists():
+    try:
+        shutil.rmtree(LOG_DIR)
+    except Exception as e:
+        print("Failed to remove logs dir:", e)
+        sys.exit(2)
+
+# Helper to run a single worker
+def run_worker(worker_name: str, out_json: Path) -> dict:
+    cmd = RUNNER + ["--worker", worker_name, "--output-json", str(out_json)]
+    print("Running:", " ".join(cmd))
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    print(p.stdout)
+    if p.returncode != 0:
+        print("Runner failed:", p.stderr)
+        sys.exit(3)
+    if not out_json.exists():
+        print("Expected metrics file missing:", out_json)
+        sys.exit(4)
+    with open(out_json, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# Run baseline
+baseline_metrics = run_worker("baseline_worker", BASE_METRICS)
+# Run optimized
+optimized_metrics = run_worker("optimized_worker", OPT_METRICS)
+
+# Verify logs
+BASE_LOG = LOG_DIR / "baseline.log"
+OPT_LOG = LOG_DIR / "optimized.log"
+
+if not BASE_LOG.exists() or not OPT_LOG.exists():
+    print("Missing log files. Expected both:", BASE_LOG, OPT_LOG)
+    sys.exit(5)
+
+def read_log(path):
+    items = {}
+    count = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception as e:
+                print(f"Invalid JSON in {path}: {e}")
+                sys.exit(6)
+            jid = rec.get("job_id")
+            items[jid] = rec
+            count += 1
+    return items, count
+
+base_items, base_count = read_log(BASE_LOG)
+opt_items, opt_count = read_log(OPT_LOG)
+
+print(f"Baseline log lines: {base_count}; Optimized log lines: {opt_count}")
+
+# Expected lines: WARMUP + TOTAL (these constants are in runner.py but we avoid importing it; just check counts equal)
+if base_count != opt_count:
+    print("Mismatch in log line counts")
+    sys.exit(7)
+
+# Verify for each job_id the deterministic fields match (length, vowels)
+mismatches = []
+for jid, b in base_items.items():
+    o = opt_items.get(jid)
+    if o is None:
+        mismatches.append(f"Missing job {jid} in optimized log")
+        continue
+    for field in ("length", "vowels"):
+        if b.get(field) != o.get(field):
+            mismatches.append(f"Job {jid} field {field} differs: baseline={b.get(field)} opt={o.get(field)}")
+
+if mismatches:
+    print("Found mismatches between logs:")
+    for m in mismatches[:20]:
+        print(" -", m)
+    sys.exit(8)
+
+# Build perf report
+report = {
+    "baseline": baseline_metrics,
+    "optimized": optimized_metrics,
+    "derived": {},
+}
+# Compute simple speedups
+try:
+    b_t = baseline_metrics.get("throughput_rps", 0.0)
+    o_t = optimized_metrics.get("throughput_rps", 0.0)
+    report["derived"]["throughput_speedup"] = o_t / b_t if b_t > 0 else None
+    # Latency improvements (ratio of p95 etc.)
+    for p in ("p50", "p90", "p95", "p99", "avg"):
+        b_p = baseline_metrics.get(p, 0.0)
+        o_p = optimized_metrics.get(p, 0.0)
+        report["derived"][f"{p}_ratio"] = (o_p / b_p) if b_p > 0 else None
+except Exception:
+    pass
+
+with open(PERF_REPORT, "w", encoding="utf-8") as f:
+    json.dump(report, f, indent=2)
+
+# Print human-readable summary
+def print_summary(name, m):
+    print("---")
+    print(name)
+    print(f"Requests: {m['requests']}, Concurrency: {m['concurrency']}")
+    print("Latency p50/p90/p95/p99/avg (s):", f"{m['p50']:.6f}", f"{m['p90']:.6f}", f"{m['p95']:.6f}", f"{m['p99']:.6f}", f"{m['avg']:.6f}")
+    print("Throughput (req/s):", f"{m['throughput_rps']:.2f}")
+
+print_summary("Baseline", baseline_metrics)
+print_summary("Optimized", optimized_metrics)
+print("\nPerf report written to", PERF_REPORT)
+print("All checks passed.")
+
+# Exit 0
+sys.exit(0)
